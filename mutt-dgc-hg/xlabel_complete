@@ -1,0 +1,253 @@
+# HG changeset patch
+# Parent 34c0b1273803c31a49f2fdfe632301d375690099
+Adds label completion.
+
+A global label hash is added, to which labels are added as they're parsed
+from a mailbox file or edited manually by the user.  Reference counts are
+kept in the hash table so that unused labels are removed from available
+completions.  Completion is available in the label editor only, but it
+may be feasible to add for search expressions if the preceding text ends
+with '~y'.
+
+diff -r 34c0b1273803 curs_main.c
+--- a/curs_main.c	Mon Jan 03 12:06:31 2011 -0600
++++ b/curs_main.c	Mon Jan 03 12:06:32 2011 -0600
+@@ -1286,6 +1286,9 @@
+ 	  FREE (&Context);
+ 	}
+ 
++        if (Labels)
++          hash_destroy(&Labels, NULL);
++
+         mutt_sleep (0);
+ 
+ 	/* Set CurrentMenu to MENU_MAIN before executing any folder
+@@ -1300,6 +1303,8 @@
+ 					(option (OPTREADONLY) || op == OP_MAIN_CHANGE_FOLDER_READONLY) ?
+ 					M_READONLY : 0, NULL)) != NULL)
+ 	{
++	  Labels = hash_create(131, 0);
++	  mutt_scan_labels(Context);
+ 	  menu->current = ci_first_message ();
+ 	}
+ 	else
+diff -r 34c0b1273803 enter.c
+--- a/enter.c	Mon Jan 03 12:06:31 2011 -0600
++++ b/enter.c	Mon Jan 03 12:06:32 2011 -0600
+@@ -529,6 +529,24 @@
+ 	    }
+ 	    break;
+ 	  }
++	  else if (flags & M_LABEL && ch == OP_EDITOR_COMPLETE)
++	  {
++	    /* invoke the alias-menu to get more addresses */
++	    for (i = state->curpos; i && state->wbuf[i-1] != ',' && 
++		 state->wbuf[i-1] != ':'; i--)
++	      ;
++	    for (; i < state->lastchar && state->wbuf[i] == ' '; i++)
++	      ;
++	    my_wcstombs (buf, buflen, state->wbuf + i, state->curpos - i);
++	    r = mutt_label_complete (buf, buflen, i, state->tabs);
++	    replace_part (state, i, buf);
++	    if (!r)
++	    {
++	      rv = 1;
++	      goto bye;
++	    }
++	    break;
++	  }
+ 	  else if (flags & M_ALIAS && ch == OP_EDITOR_COMPLETE_QUERY)
+ 	  {
+ 	    /* invoke the query-menu to get more addresses */
+diff -r 34c0b1273803 globals.h
+--- a/globals.h	Mon Jan 03 12:06:31 2011 -0600
++++ b/globals.h	Mon Jan 03 12:06:32 2011 -0600
+@@ -156,6 +156,7 @@
+ WHERE const char *ReleaseDate;
+ 
+ WHERE HASH *Groups;
++WHERE HASH *Labels;
+ WHERE HASH *ReverseAlias;
+ 
+ WHERE LIST *AutoViewList INITVAL(0);
+diff -r 34c0b1273803 headers.c
+--- a/headers.c	Mon Jan 03 12:06:31 2011 -0600
++++ b/headers.c	Mon Jan 03 12:06:32 2011 -0600
+@@ -216,6 +216,31 @@
+   }
+ }
+ 
++static void label_ref_dec(char *label)
++{
++  uintptr_t count;
++
++  count = (uintptr_t)hash_find(Labels, label);
++  if (count)
++  {
++    hash_delete(Labels, label, NULL, NULL);
++    count--;
++    if (count > 0)
++      hash_insert(Labels, label, (void *)count, 0);
++  }
++}
++
++static void label_ref_inc(char *label)
++{
++  uintptr_t count;
++
++  count = (uintptr_t)hash_find(Labels, label);
++  if (count)
++    hash_delete(Labels, label, NULL, NULL);
++  count++;  /* was zero if not found */
++  hash_insert(Labels, label, (void *)count, 0);
++}
++
+ /*
+  * add an X-Label: field.
+  */
+@@ -228,12 +253,20 @@
+   if (hdr->env->x_label != NULL && new != NULL &&
+       strcmp(hdr->env->x_label, new) == 0)
+     return 0;
++
+   if (hdr->env->x_label != NULL)
++  {
++    label_ref_dec(hdr->env->x_label);
+     FREE(&hdr->env->x_label);
++  }
++
+   if (new == NULL)
+     hdr->env->x_label = NULL;
+   else
++  {
+     hdr->env->x_label = safe_strdup(new);
++    label_ref_inc(hdr->env->x_label);
++  }
+   return hdr->changed = hdr->xlabel_changed = 1;
+ }
+ 
+@@ -248,7 +281,7 @@
+     strncpy(buf, hdr->env->x_label, LONG_STRING);
+   }
+ 
+-  if (mutt_get_field("Label: ", buf, sizeof(buf), 0 /* | M_CLEAR */) != 0)
++  if (mutt_get_field("Label: ", buf, sizeof(buf), M_LABEL /* | M_CLEAR */) != 0)
+     return 0;
+ 
+   new = buf;
+@@ -273,3 +306,14 @@
+ 
+   return changed;
+ }
++
++/* scan a context (mailbox) and hash all labels we find */
++void mutt_scan_labels(CONTEXT *ctx)
++{
++  int i;
++
++  for (i = 0; i < ctx->msgcount; i++)
++    if (ctx->hdrs[i]->env->x_label)
++      label_ref_inc(ctx->hdrs[i]->env->x_label);
++}
++
+diff -r 34c0b1273803 init.c
+--- a/init.c	Mon Jan 03 12:06:31 2011 -0600
++++ b/init.c	Mon Jan 03 12:06:32 2011 -0600
+@@ -3235,3 +3235,57 @@
+ 
+   return NULL;
+ }
++
++int mutt_label_complete (char *buffer, size_t len, int pos, int numtabs)
++{
++  char *pt = buffer;
++  int spaces; /* keep track of the number of leading spaces on the line */
++
++  SKIPWS (buffer);
++  spaces = buffer - pt;
++
++  pt = buffer + pos - spaces;
++  while ((pt > buffer) && !isspace ((unsigned char) *pt))
++    pt--;
++
++  /* first TAB. Collect all the matches */
++  if (numtabs == 1)
++  {
++    struct hash_elem *entry;
++    struct hash_walk_state state;
++
++    Num_matched = 0;
++    strfcpy (User_typed, pt, sizeof (User_typed));
++    memset (Matches, 0, Matches_listsize);
++    memset (Completed, 0, sizeof (Completed));
++    memset (&state, 0, sizeof(state));
++    while ((entry = hash_walk(Labels, &state)))
++      candidate (Completed, User_typed, entry->key, sizeof (Completed));
++    matches_ensure_morespace (Num_matched);
++    qsort(Matches, Num_matched, sizeof(char *), (sort_t *) mutt_strcasecmp);
++    Matches[Num_matched++] = User_typed;
++
++    /* All matches are stored. Longest non-ambiguous string is ""
++     * i.e. dont change 'buffer'. Fake successful return this time */
++    if (User_typed[0] == 0)
++      return 1;
++  }
++
++  if (Completed[0] == 0 && User_typed[0])
++    return 0;
++
++   /* Num_matched will _always_ be atleast 1 since the initial
++    * user-typed string is always stored */
++  if (numtabs == 1 && Num_matched == 2)
++    snprintf(Completed, sizeof(Completed), "%s", Matches[0]);
++  else if (numtabs > 1 && Num_matched > 2)
++    /* cycle thru all the matches */
++    snprintf(Completed, sizeof(Completed), "%s", 
++             Matches[(numtabs - 2) % Num_matched]);
++
++  /* return the completed label */
++  strncpy (buffer, Completed, len - spaces);
++
++  return 1;
++}
++
+diff -r 34c0b1273803 main.c
+--- a/main.c	Mon Jan 03 12:06:31 2011 -0600
++++ b/main.c	Mon Jan 03 12:06:32 2011 -0600
+@@ -1023,9 +1023,13 @@
+     if((Context = mx_open_mailbox (folder, ((flags & M_RO) || option (OPTREADONLY)) ? M_READONLY : 0, NULL))
+        || !explicit_folder)
+     {
++      Labels = hash_create (131, 0);
++      mutt_scan_labels(Context);
+       mutt_index_menu ();
+       if (Context)
+ 	FREE (&Context);
++      if (Labels)
++        hash_destroy(&Labels, NULL);
+     }
+ #ifdef USE_IMAP
+     imap_logout_all ();
+diff -r 34c0b1273803 mutt.h
+--- a/mutt.h	Mon Jan 03 12:06:31 2011 -0600
++++ b/mutt.h	Mon Jan 03 12:06:32 2011 -0600
+@@ -90,6 +90,7 @@
+ #define  M_CLEAR   (1<<5) /* clear input if printable character is pressed */
+ #define  M_COMMAND (1<<6) /* do command completion */
+ #define  M_PATTERN (1<<7) /* pattern mode - only used for history classes */
++#define  M_LABEL   (1<<8) /* do label completion */
+ 
+ /* flags for mutt_get_token() */
+ #define M_TOKEN_EQUAL		1	/* treat '=' as a special */
+diff -r 34c0b1273803 protos.h
+--- a/protos.h	Mon Jan 03 12:06:31 2011 -0600
++++ b/protos.h	Mon Jan 03 12:06:32 2011 -0600
+@@ -187,6 +187,8 @@
+ void mutt_edit_headers (const char *, const char *, HEADER *, char *, size_t);
+ int mutt_filter_unprintable (char **);
+ int mutt_label_message (HEADER *);
++void mutt_scan_labels (CONTEXT *);
++int mutt_label_complete (char *, size_t, int, int);
+ void mutt_curses_error (const char *, ...);
+ void mutt_curses_message (const char *, ...);
+ void mutt_encode_path (char *, size_t, const char *);

@@ -1,0 +1,309 @@
+diff -r 8b39e2be6bbd PATCHES
+--- a/PATCHES	Mon Jan 03 12:06:25 2011 -0600
++++ b/PATCHES	Mon Jan 03 12:06:26 2011 -0600
+@@ -0,0 +1,1 @@
++patch-1.5.11.ats.mark_old.1.5
+diff -r 8b39e2be6bbd buffy.c
+--- a/buffy.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/buffy.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -107,7 +107,7 @@
+ 
+   hdr = mutt_new_header ();
+   tmp_envelope = mutt_read_rfc822_header (f, hdr, 0, 0);
+-  if (!(hdr->read || hdr->old))
++  if (!(hdr->read || (option(OPTSEEOLD) && hdr->old)))
+     result = 1;
+ 
+   mutt_free_envelope(&tmp_envelope);
+diff -r 8b39e2be6bbd curs_main.c
+--- a/curs_main.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/curs_main.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -221,7 +221,7 @@
+       if (! Context->hdrs[Context->v2r[i]]->read &&
+ 	  ! Context->hdrs[Context->v2r[i]]->deleted)
+       {
+-	if (! Context->hdrs[Context->v2r[i]]->old)
++	if (! (option(OPTSEEOLD) && Context->hdrs[Context->v2r[i]]->old))
+ 	  return (i);
+ 	else if (old == -1)
+ 	  old = i;
+@@ -1633,7 +1633,7 @@
+ 	  {
+ 	    if (first_unread == -1)
+ 	      first_unread = i;
+-	    if ((!CURHDRi->old) && first_new == -1)
++	    if ((!(option(OPTSEEOLD) && CURHDRi->old)) && first_new == -1)
+ 	      first_new = i;
+ 	  }
+ 
+@@ -1721,7 +1721,7 @@
+ 	    if (Context->hdrs[Context->v2r[j]]->tagged)
+ 	    {
+ 	      if (Context->hdrs[Context->v2r[j]]->read ||
+-		  Context->hdrs[Context->v2r[j]]->old)
++		  (option(OPTSEEOLD) && Context->hdrs[Context->v2r[j]]->old))
+ 		mutt_set_flag (Context, Context->hdrs[Context->v2r[j]], M_NEW, 1);
+ 	      else
+ 		mutt_set_flag (Context, Context->hdrs[Context->v2r[j]], M_READ, 1);
+@@ -1731,7 +1731,7 @@
+ 	}
+ 	else
+ 	{
+-	  if (CURHDR->read || CURHDR->old)
++	  if (CURHDR->read || (option(OPTSEEOLD) && CURHDR->old))
+ 	    mutt_set_flag (Context, CURHDR, M_NEW, 1);
+ 	  else
+ 	    mutt_set_flag (Context, CURHDR, M_READ, 1);
+diff -r 8b39e2be6bbd flags.c
+--- a/flags.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/flags.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -94,7 +94,7 @@
+ 
+       if (bf)
+       {
+-	if (h->read || h->old)
++	if (h->read || (option(OPTSEEOLD) && h->old))
+ 	{
+           update = 1;
+ 	  h->old = 0;
+@@ -349,6 +349,11 @@
+ 
+     case 'o':
+     case 'O':
++      if (!option(OPTSEEOLD)) {
++        mutt_error _("Set $see_old first");
++        return (-1);
++      }
++
+       if (h)
+ 	mutt_set_flag (Context, h, M_READ, !bf);
+       else
+diff -r 8b39e2be6bbd hdrline.c
+--- a/hdrline.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/hdrline.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -578,7 +578,7 @@
+ 	ch = 'r';
+       else if (hdr->read && (ctx && ctx->msgnotreadyet != hdr->msgno))
+ 	ch = '-';
+-      else if (hdr->old)
++      else if (option(OPTSEEOLD) && hdr->old)
+ 	ch = 'O';
+       else
+ 	ch = 'N';
+@@ -653,7 +653,8 @@
+       snprintf (buf2, sizeof (buf2),
+ 		"%c%c%c", (THREAD_NEW ? 'n' : (THREAD_OLD ? 'o' : 
+ 		((hdr->read && (ctx && ctx->msgnotreadyet != hdr->msgno))
+-		? (hdr->replied ? 'r' : ' ') : (hdr->old ? 'O' : 'N')))),
++		? (hdr->replied ? 'r' : ' ') :
++                ((option(OPTSEEOLD) && hdr->old) ? 'O' : 'N')))),
+ 		hdr->deleted ? 'D' : (hdr->attach_del ? 'd' : ch),
+ 		hdr->tagged ? '*' :
+ 		(hdr->flagged ? '!' :
+diff -r 8b39e2be6bbd init.h
+--- a/init.h	Mon Jan 03 12:06:25 2011 -0600
++++ b/init.h	Mon Jan 03 12:06:26 2011 -0600
+@@ -1426,7 +1426,7 @@
+   ** to maildir-style mailboxes.  Setting it will have no effect on other
+   ** mailbox types.
+   */
+-  { "mark_old",		DT_BOOL, R_BOTH, OPTMARKOLD, 1 },
++  { "mark_old",		DT_BOOL, R_BOTH, OPT_MARKOLD, 1 },
+   /*
+   ** .pp
+   ** Controls whether or not mutt marks \fInew\fP \fBunread\fP
+@@ -1434,6 +1434,12 @@
+   ** With this option \fIset\fP, the next time you start mutt, the messages
+   ** will show up with an ``O'' next to them in the index menu,
+   ** indicating that they are old.
++  ** .pp
++  ** If unset, messages remain \fInew\fP until they are read or the
++  ** \fInew\fP flag is explicitly removed.  See also the ``$$see_old''
++  ** variable.
++  ** .pp
++  ** N.B. This variable does not affect IMAP folders.
+   */
+   { "markers",		DT_BOOL, R_PAGER, OPTMARKERS, 1 },
+   /*
+@@ -2481,6 +2487,13 @@
+   ** .pp
+   ** Also see the $$force_name variable.
+   */
++  { "see_old",     DT_BOOL, R_BOTH, OPTSEEOLD, 1 },
++  /*
++  ** .pp
++  ** Controls whether or not Mutt makes the distinction between \fInew\fP
++  ** messages and \fIold\fP \fBunread\fP messages.  In order to make Mutt
++  ** treat all unread messages as new only, you can unset this variable.
++  */
+   { "score", 		DT_BOOL, R_NONE, OPTSCORE, 1 },
+   /*
+   ** .pp
+diff -r 8b39e2be6bbd mutt.h
+--- a/mutt.h	Mon Jan 03 12:06:25 2011 -0600
++++ b/mutt.h	Mon Jan 03 12:06:26 2011 -0600
+@@ -266,6 +266,7 @@
+   OPT_FORWEDIT,
+   OPT_FCCATTACH,
+   OPT_INCLUDE,
++  OPT_MARKOLD,
+   OPT_MFUPTO,
+   OPT_MIMEFWD,
+   OPT_MIMEFWDREST,
+@@ -387,7 +388,6 @@
+   OPTMAILCHECKRECENT,
+   OPTMAILDIRTRASH,
+   OPTMARKERS,
+-  OPTMARKOLD,
+   OPTMENUSCROLL,	/* scroll menu instead of implicit next-page */
+   OPTMENUMOVEOFF,	/* allow menu to scroll past last entry */
+ #if defined(USE_IMAP) || defined(USE_POP)
+@@ -420,6 +420,7 @@
+   OPTSAVEEMPTY,
+   OPTSAVENAME,
+   OPTSCORE,
++  OPTSEEOLD,
+   OPTSIGDASHES,
+   OPTSIGONTOP,
+   OPTSORTRE,
+diff -r 8b39e2be6bbd mx.c
+--- a/mx.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/mx.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -779,7 +779,7 @@
+ /* save changes and close mailbox */
+ int mx_close_mailbox (CONTEXT *ctx, int *index_hint)
+ {
+-  int i, move_messages = 0, purge = 1, read_msgs = 0;
++  int i, move_messages = 0, purge = 1, mark_old = 1, read_msgs = 0, new_msgs = 0;
+   int check;
+   int isSpool = 0;
+   CONTEXT f;
+@@ -812,6 +812,8 @@
+     if (!ctx->hdrs[i]->deleted && ctx->hdrs[i]->read 
+         && !(ctx->hdrs[i]->flagged && option (OPTKEEPFLAGGED)))
+       read_msgs++;
++    if (!ctx->hdrs[i]->deleted && !ctx->hdrs[i]->read && !ctx->hdrs[i]->old)
++      new_msgs++;
+   }
+ 
+   if (read_msgs && quadoption (OPT_MOVE) != M_NO)
+@@ -841,6 +843,14 @@
+     }
+   }
+ 
++  if (new_msgs)
++  {
++    snprintf (buf, sizeof (buf), new_msgs == 1
++	     ? _("Mark new message as old?") : _("Mark new messages as old?"));
++    if ((mark_old = query_quadoption (OPT_MARKOLD, buf)) < 0)
++      return (-1);
++  }
++
+   /* 
+    * There is no point in asking whether or not to purge if we are
+    * just marking messages as "trash".
+@@ -857,7 +867,7 @@
+     }
+   }
+ 
+-  if (option (OPTMARKOLD))
++  if (mark_old)
+   {
+     for (i = 0; i < ctx->msgcount; i++)
+     {
+diff -r 8b39e2be6bbd pager.c
+--- a/pager.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/pager.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -2648,7 +2648,7 @@
+ 	CHECK_READONLY;
+ 	CHECK_ACL(M_ACL_SEEN, _("toggle new"));
+ 
+-	if (extra->hdr->read || extra->hdr->old)
++	if (extra->hdr->read || (option(OPTSEEOLD) && extra->hdr->old))
+ 	  mutt_set_flag (Context, extra->hdr, M_NEW, 1);
+ 	else if (!first)
+ 	  mutt_set_flag (Context, extra->hdr, M_READ, 1);
+diff -r 8b39e2be6bbd pattern.c
+--- a/pattern.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/pattern.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -1109,13 +1109,14 @@
+     case M_TAG:
+       return (pat->not ^ h->tagged);
+     case M_NEW:
+-      return (pat->not ? h->old || h->read : !(h->old || h->read));
++      return (pat->not ^ !((option(OPTSEEOLD) && h->old) || h->read));
+     case M_UNREAD:
+       return (pat->not ? h->read : !h->read);
+     case M_REPLIED:
+       return (pat->not ^ h->replied);
+     case M_OLD:
+-      return (pat->not ? (!h->old || h->read) : (h->old && !h->read));
++      return (pat->not ? (!(option(OPTSEEOLD) && h->old) || h->read) :
++              ((option(OPTSEEOLD) && h->old) && !h->read));
+     case M_READ:
+       return (pat->not ^ h->read);
+     case M_DELETED:
+diff -r 8b39e2be6bbd pop.c
+--- a/pop.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/pop.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -349,7 +349,7 @@
+       {
+         if (bcached)
+           ctx->hdrs[i]->read = 1;
+-        else if (option (OPTMARKOLD))
++        else if (option (OPT_MARKOLD))
+           ctx->hdrs[i]->old = 1;
+       }
+       else
+diff -r 8b39e2be6bbd status.c
+--- a/status.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/status.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -167,9 +167,11 @@
+       if (!optional)
+       {
+ 	snprintf (fmt, sizeof (fmt), "%%%sd", prefix);
+-	snprintf (buf, buflen, fmt, Context ? Context->new : 0);
++	snprintf (buf, buflen, fmt, Context ?
++                  (option(OPTSEEOLD) ? Context->new : Context->unread) : 0);
+       }
+-      else if (!Context || !Context->new)
++      else if (!Context ||
++               !(option(OPTSEEOLD) ? Context->new : Context->unread))
+ 	optional = 0;
+       break;
+ 
+@@ -177,9 +179,11 @@
+       if (!optional)
+       {
+ 	snprintf (fmt, sizeof (fmt), "%%%sd", prefix);
+-	snprintf (buf, buflen, fmt, Context ? Context->unread - Context->new : 0);
++	snprintf (buf, buflen, fmt, (Context && option(OPTSEEOLD)) ?
++                  Context->unread - Context->new : 0);
+       }
+-      else if (!Context || !(Context->unread - Context->new))
++      else if (!Context || !option(OPTSEEOLD) ||
++               !(Context->unread - Context->new))
+ 	optional = 0;
+       break;
+ 
+diff -r 8b39e2be6bbd thread.c
+--- a/thread.c	Mon Jan 03 12:06:25 2011 -0600
++++ b/thread.c	Mon Jan 03 12:06:26 2011 -0600
+@@ -1151,7 +1151,7 @@
+ 
+   if (!cur->read && CHECK_LIMIT)
+   {
+-    if (cur->old)
++    if (option(OPTSEEOLD) && cur->old)
+       old = 2;
+     else
+       new = 1;
+@@ -1228,7 +1228,7 @@
+ 
+       if (!cur->read && CHECK_LIMIT)
+       {
+-	if (cur->old)
++	if (option(OPTSEEOLD) && cur->old)
+ 	  old = 2;
+ 	else
+ 	  new = 1;

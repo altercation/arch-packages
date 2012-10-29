@@ -1,0 +1,132 @@
+# Maintainer: Ethan Schoonover <es@ethanschoonover.com>
+
+pkgname=mutt-dgc-hg
+pkgver=20121029
+pkgrel=1
+pkgdesc='Mutt text-based mail client with DGC patch queue inc. nested_if and date_conditional'
+url='http://bitbucket.org/dgc/mutt-dgc'
+license=('GPL')
+backup=('etc/Muttrc')
+arch=('i686' 'x86_64')
+optdepends=('smtp-forwarder: to send mail')
+depends=('gpgme' 'ncurses' 'openssl' 'libsasl' 'gdbm' 'libidn' 'mime-types' 'krb5')
+hgroot='http://dev.mutt.org/hg/mutt#HEAD'
+hgrepo='mutt'
+source=('pop-cachedir.patch'
+        'crypt-gpgme.patch'
+        'hashwalk'
+        'dgc.xlabel_ext'
+        'xlabel_complete'
+        'keywords'
+        'complete-pattern-y'
+        'replacelist'
+        'subjectrx'
+        'mailboxrx'
+        'obfuscat'
+        'whitespaceok'
+        'dgc.flagsafe'
+        'dgc.groupalts'
+        'dgc.isalias'
+        'dgc.markmsg'
+        'dgc.setenv'
+        'dgc.uncollapsenew'
+        'ats.date_conditional'
+        'dgc.nested_if.2'
+        'ats.mark_old'
+        'growl')
+md5sums=('7df7780d8bbdcbad1eb0d673de9976b2'
+         '6cb5b3ca56bd03c00c6768864070a2d4'
+         'ea85c7292c6667a56da2e6daf3a578b3'
+         'f8904c0971aabfb249944d4f2b2bb631'
+         '6abade7198411c687bde5eab3946413c'
+         '10c1c19cedf20e3d3651a7db7295f20b'
+         '0af108639ad0bdbfca71ba806c3fc7d6'
+         'c084ee060a2b9f2ab8ceed95aad467b9'
+         'cd9e2f64ae90fb6be1fcfb13ad086841'
+         'fb6b1f08c7d341582163ec01a9b4c5dc'
+         '877b23545fd6ece7784d9f2b83cd5c40'
+         '085a54878e43ec24e437671610624cc9'
+         'bde23be53f25979ea4ebc792a3c2f123'
+         'c6c435c37f5afdbb1cad0a47b370af87'
+         '8d5e1222874fd81cbd6603daf68f8e73'
+         'c4505295ccd8fcdd10e60a3ba81f311f'
+         '3af89a7d774ddbe4a352842c63150d38'
+         '5bf0a5d21c42603d2c532ae8fafef5cb'
+         'a78547e7bdf74c2938847bc4df97098a'
+         '0af9052518d6e68b32e45a5804b08a52'
+         'b4de049668d2af5a6a8e62975dd7a7db'
+         '091cf7740f7b1ff72cac4300ed60de0a')
+
+install=install
+
+build() {
+	cd "$srcdir"
+
+	if [[ -d "$hgrepo" ]] ; then
+		cd "$hgrepo"
+		hg pull -u
+	else
+		hg clone "$hgroot" "$hgrepo"
+		cd "$hgrepo"
+		hg pull -u
+	fi
+
+	cd "$srcdir"
+	rm -rf "${hgrepo}-build" > /dev/null 2>&1 || true
+	cp -r "$hgrepo" "${hgrepo}-build"
+
+	cd "${srcdir}/${hgrepo}-build"
+
+	for patchfile in \
+		crypt-gpgme.patch \
+		hashwalk \
+		dgc.xlabel_ext \
+		xlabel_complete \
+		keywords \
+		complete-pattern-y \
+		replacelist \
+		subjectrx \
+		mailboxrx \
+		obfuscat \
+		whitespaceok \
+		dgc.flagsafe \
+		dgc.groupalts \
+		dgc.isalias \
+		dgc.markmsg \
+		dgc.setenv \
+		dgc.uncollapsenew \
+		ats.date_conditional \
+		dgc.nested_if.2 \
+		ats.mark_old \
+		growl;
+	do
+		patch -p1 -i ../$patchfile
+	done
+
+	./prepare \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--enable-gpgme \
+		--enable-pop \
+		--enable-imap \
+		--enable-smtp \
+		--enable-hcache \
+		--with-curses=/usr \
+		--with-regex \
+		--with-gss=/usr \
+		--with-ssl=/usr \
+		--with-sasl \
+		--with-idn \
+
+	make
+}
+
+package() {
+	cd "${srcdir}/${hgrepo}-build"
+	make DESTDIR="${pkgdir}" install
+
+	rm "${pkgdir}"/usr/bin/{flea,muttbug}
+	rm "${pkgdir}"/usr/share/man/man1/{flea,muttbug}.1
+	rm "${pkgdir}"/etc/mime.types{,.dist}
+	install -Dm644 contrib/gpg.rc "${pkgdir}"/etc/Muttrc.gpg.dist
+}

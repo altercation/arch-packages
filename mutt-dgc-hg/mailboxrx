@@ -1,0 +1,101 @@
+# HG changeset patch
+# Parent 6d4163012bb334d96e073cdaedc1b95fe13b94f3
+Adds mailboxrx (and unmailboxrx) command.
+
+Mailboxrx allows you to define a regular expression and replacement
+template for mailbox names.  Wherever status_format's %f is expanded,
+the folder name will be matched in turn against each mailboxrx
+expression.  If any expression matches, a replacement of the mailbox
+name will be performed, with backreference expansion.
+
+Example:
+mailboxrx imaps://(.*)@imap.gmail.com/ %1@gmail:%R
+
+This makes any Google Mail IMAP mailbox look like username@gmail:folder.
+%1 expands to the first parenthesized subexpression in the regex.  %L is
+all text to the left of the matching expression, and %R is all text to
+the right of the matching expression.
+
+
+mailboxrx (pop|imap)s?://.*\.([^.]+).[^.]+/ %2:%R
+This more generally simplifies POP or IMAP mailbox display, reducing it
+to "domain:folder" where "domain" is the DNS domain of the server minus
+the top-level domain (.com, .net, etc).
+
+
+Mailboxrx commands are stackable.  On top of the above, you could add:
+mailboxrx earthlink %Leln%R
+
+This would replace "earthlink" with "eln" regardless of where it appears
+in the mailbox name.
+
+diff -r 6d4163012bb3 globals.h
+--- a/globals.h	Mon Jan 03 12:06:48 2011 -0600
++++ b/globals.h	Mon Jan 03 12:06:48 2011 -0600
+@@ -186,6 +186,7 @@
+ WHERE REPLACE_LIST *SpamList INITVAL(0);
+ WHERE RX_LIST *NoSpamList INITVAL(0);
+ WHERE REPLACE_LIST *SubjectRxList INITVAL(0);
++WHERE REPLACE_LIST *MailboxRxList INITVAL(0);
+ 
+ 
+ /* bit vector for boolean variables */
+diff -r 6d4163012bb3 init.h
+--- a/init.h	Mon Jan 03 12:06:48 2011 -0600
++++ b/init.h	Mon Jan 03 12:06:48 2011 -0600
+@@ -3643,6 +3643,8 @@
+   { "macro",		mutt_parse_macro,	0 },
+   { "mailboxes",	mutt_parse_mailboxes,	M_MAILBOXES },
+   { "unmailboxes",	mutt_parse_mailboxes,	M_UNMAILBOXES },
++  { "mailboxrx",    parse_replace_list, UL &MailboxRxList },
++  { "unmailboxrx",  parse_unreplace_list, UL &MailboxRxList },
+   { "message-hook",	mutt_parse_hook,	M_MESSAGEHOOK },
+   { "mbox-hook",	mutt_parse_hook,	M_MBOXHOOK },
+   { "mime_lookup",	parse_list,	UL &MimeLookupList },
+diff -r 6d4163012bb3 muttlib.c
+--- a/muttlib.c	Mon Jan 03 12:06:48 2011 -0600
++++ b/muttlib.c	Mon Jan 03 12:06:48 2011 -0600
+@@ -810,10 +810,24 @@
+   }
+ }
+ 
++static void apply_mailboxrx (char *s, size_t buflen)
++{
++  char *repl;
++
++  repl = mutt_apply_replace (NULL, 0, s, MailboxRxList);
++  if (repl)
++  {
++    strncpy(s, repl, buflen-1);
++    s[buflen-1] = '\0';
++    FREE(&repl);
++  }
++}
++
+ /* collapse the pathname using ~ or = when possible */
+-void mutt_pretty_mailbox (char *s, size_t buflen)
++void mutt_pretty_mailbox (char *buf, size_t buflen)
+ {
+-  char *p = s, *q = s;
++  char *s = buf;
++  char *p = buf, *q = buf;
+   size_t len;
+   url_scheme_t scheme;
+   char tmp[PATH_MAX];
+@@ -824,6 +838,7 @@
+   if (scheme == U_IMAP || scheme == U_IMAPS)
+   {
+     imap_pretty_mailbox (s);
++    apply_mailboxrx (buf, buflen);
+     return;
+   }
+ #endif
+@@ -879,6 +894,8 @@
+     *s++ = '~';
+     memmove (s, s + len - 1, mutt_strlen (s + len - 1) + 1);
+   }
++
++  apply_mailboxrx (buf, buflen);
+ }
+ 
+ void mutt_pretty_size (char *s, size_t len, LOFF_T n)

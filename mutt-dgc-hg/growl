@@ -1,0 +1,429 @@
+# HG changeset patch
+# Parent 0fb98a9cad333f97934b4aaafe0d62b897e2985c
+Add support for new mail notifications to Growl (OSX).
+
+A minimum working configuration (if you run Mutt on a Mac with Growl
+configured to "Listen for incoming notifications") is:
+
+    set growl = yes
+    set growl_password = 'my growl password'
+
+But you can customize things more; see configuration variables
+beginning with "growl_" for setup details.  In particular, you can use
+$growl_target to post network notifications over UDP to a different
+computer from the one you run Mutt on.  This is useful for those using a
+Mac desktop but running mutt elsewhere over ssh.
+
+The first time you use a Growl-enabled mutt, you must "Allow remote
+application registration" in the Growl control panel.  After this you
+can disable remote registration.
+
+There are two types of notifications posted:
+
+* Mailbox Updated - the basic buffy notification when there is new
+  mail in some mailbox that you're not currently reading
+* New Mail - a description of a new message in your current mailbox
+
+New Mail notifications for messages that arrive in your mailbox already
+flagged (~F) will be sticky in Growl.
+
+The cGrowl library (https://bitbucket.org/dgc/cgrowl) is an external
+dependency for this feature.  You must ./configure or ./prepare mutt
+--with-growl[=PFX] to enable Growl support.
+
+diff -r 0fb98a9cad33 INSTALL
+--- a/INSTALL	Mon Jan 03 13:24:34 2011 -0600
++++ b/INSTALL	Mon Jan 03 13:24:37 2011 -0600
+@@ -194,6 +194,12 @@
+ 	addresses in the same form they are parsed.  NOTE: this requires
+ 	significantly more memory.
+ 
++--with-growl[=PFX]
++    If you have cGrowl (https://bitbucket.org/dgc/cgrowl) installed,
++    Mutt can perform network notifications over UDP to a MacOS X system
++    running the Growl event notification system.
++
++
+ Once ``configure'' has completed, simply type ``make install.''
+ 
+ Mutt should compile cleanly (without errors) and you should end up with a
+diff -r 0fb98a9cad33 buffy.c
+--- a/buffy.c	Mon Jan 03 13:24:34 2011 -0600
++++ b/buffy.c	Mon Jan 03 13:24:37 2011 -0600
+@@ -516,6 +516,10 @@
+   if (!first)
+   {
+     mutt_message ("%s", buffylist);
++#ifdef USE_GROWL
++    if (option(OPTGROWL))
++      mutt_growl_notify(M_GROWL_FOLDER, buffylist);
++#endif
+     return (1);
+   }
+   /* there were no mailboxes needing to be notified, so clean up since 
+diff -r 0fb98a9cad33 configure.ac
+--- a/configure.ac	Mon Jan 03 13:24:34 2011 -0600
++++ b/configure.ac	Mon Jan 03 13:24:37 2011 -0600
+@@ -828,6 +828,18 @@
+ 
+         fi])
+ 
++AC_ARG_WITH(growl, AC_HELP_STRING([--with-growl@<:@=PFX@:>@], [Use Growl (OSX) notification for new mail]),
++        [if test $withval != yes; then
++                mutt_cv_growl=$withval
++        fi
++        if test x$mutt_cv_growl != x; then
++                LDFLAGS="$LDFLAGS -L${mutt_cv_growl}/lib"
++                CPPFLAGS="$CPPFLAGS -I${mutt_cv_growl}/include"
++        fi
++        MUTTLIBS="$MUTTLIBS -lgrowl"
++        AC_DEFINE(USE_GROWL,1,[Enable Growl (OSX) new mail notifications?])])
++
++
+ dnl -- start cache --
+ db_found=no
+ db_requested=auto
+diff -r 0fb98a9cad33 curs_main.c
+--- a/curs_main.c	Mon Jan 03 13:24:34 2011 -0600
++++ b/curs_main.c	Mon Jan 03 13:24:37 2011 -0600
+@@ -49,6 +49,10 @@
+ 
+ #include <assert.h>
+ 
++#ifdef USE_GROWL
++#include <growl.h>
++#endif
++
+ static const char *No_mailbox_is_open = N_("No mailbox is open.");
+ static const char *There_are_no_messages = N_("There are no messages.");
+ static const char *Mailbox_is_read_only = N_("Mailbox is read-only.");
+@@ -266,6 +270,127 @@
+   return 0;
+ }
+ 
++#ifdef USE_GROWL
++
++void
++mutt_growl_notify(int type, void *data)
++{
++  static growl_session *session = NULL;
++  static growl_endpoint *endpoint = NULL;
++  int rc;
++  char titlebuf[1024];
++  char msgbuf[1024];
++  static char *curpass = NULL;
++  static char *curhost = NULL;
++  int sticky = FALSE;
++
++  char *notifications[] = {
++    "New Mail",              /* M_GROWL_MESSAGE */
++    "Mailbox Updated",       /* M_GROWL_FOLDER */
++    NULL
++  };
++
++  /* Check whether password or host has changed */
++  if (curpass && GrowlPassword && strcmp(curpass, GrowlPassword))
++  {
++    free(curpass);
++    curpass = NULL;
++    /* session is still OK; endpoint is invalid */
++    if (endpoint)
++    {
++      growl_endpoint_free(endpoint);
++      endpoint = NULL;
++    }
++  }
++  if (curhost && GrowlHost && strcmp(curhost, GrowlHost))
++  {
++    free(curhost);
++    curhost = NULL;
++    /* session and endpoint are invalid */
++    if (session)
++    {
++      growl_session_free(session);
++      session = NULL;
++    }
++    if (endpoint)
++    {
++      growl_endpoint_free(endpoint);
++      endpoint = NULL;
++    }
++  }
++
++  /* Remember password and host in current session and endpoint */
++  if (GrowlPassword && curpass == NULL)
++    curpass = strdup(GrowlPassword);
++  if (GrowlHost && curhost == NULL)
++    curhost = strdup(GrowlHost);
++
++  /* Set up session on first call, and send a registration packet in
++   * case Growl has never been used. */
++  if (session == NULL)
++  {
++    growl_registration *r;
++    int i;
++
++    /* Always send a registration packet on first call */
++    r = growl_registration_init("Mutt", GrowlPassword);
++    if (r == NULL)
++      return;
++    for (i = 0; i < M_GROWL_END; i++)
++      growl_notification_add(r, notifications[i], 1);  /* Add not'n, enabled */
++    rc = growl_registration_send(r, GrowlHost);
++    growl_registration_free(r);
++    if (rc == 1)
++    {
++      mutt_error(_("Cannot send Growl registration to %s."), GrowlHost);
++      return;
++    }
++    else if (rc == 2)
++    {
++      mutt_error(_("Invalid Growl endpoint: %s"), GrowlHost);
++      return;
++    }
++
++    session = growl_session_init("Mutt");
++  }
++
++  /* Set up endpoint on first call */
++  if (endpoint == NULL)
++    endpoint = growl_endpoint_init(GrowlHost, GrowlPassword);
++
++  if (session == NULL || endpoint == NULL)
++    return;
++
++  /* For a new mail notification, format message strings and post */
++  if (type == M_GROWL_MESSAGE)
++  {
++    struct hdr_format_info hfi;
++    hfi.ctx = Context;
++    hfi.hdr = (HEADER *)data;
++    hfi.pager_progress = 0;
++
++    mutt_FormatString(titlebuf, sizeof(titlebuf), 0, NONULL(GrowlNewTitle),
++                      status_format_str, (unsigned long)0, 0);
++    mutt_FormatString(msgbuf, sizeof(msgbuf), 0, NONULL(GrowlNewMessage),
++                      hdr_format_str, (unsigned long)&hfi, 0);
++    if (hfi.hdr->flagged)
++      sticky = TRUE;
++  }
++
++  else if (type == M_GROWL_FOLDER)
++  {
++    snprintf(titlebuf, sizeof(titlebuf), "New Mail");
++    snprintf(msgbuf, sizeof(msgbuf), "%s", (char *)data);
++  }
++
++  if (sticky)
++    growl_endpoint_set(endpoint, GROWL_OPTION_STICKY, GROWL_TRUE);
++  else
++    growl_endpoint_set(endpoint, GROWL_OPTION_STICKY, GROWL_FALSE);
++  growl_send(session, endpoint, notifications[type], titlebuf, msgbuf);
++}
++#endif
++
+ static void update_index (MUTTMENU *menu, CONTEXT *ctx, int check,
+ 			  int oldcount, int index_hint)
+ {
+@@ -282,6 +407,19 @@
+       oldcount = 0; /* invalid message number! */
+   }
+ 
++#ifdef USE_GROWL
++  /* Growl notifications */
++  if (option(OPTGROWL) && check == M_NEW_MAIL && oldcount < ctx->msgcount)
++  {
++    for (j = oldcount; j < ctx->msgcount; j++)
++    {
++      if (ctx->hdrs[j]->old || ctx->hdrs[j]->read)
++        continue;
++      mutt_growl_notify(M_GROWL_MESSAGE, ctx->hdrs[j]);
++    }
++  }
++#endif
++
+   /* We are in a limited view. Check if the new message(s) satisfy
+    * the limit criteria. If they do, set their virtual msgno so that
+    * they will be visible in the limited view */
+diff -r 0fb98a9cad33 globals.h
+--- a/globals.h	Mon Jan 03 13:24:34 2011 -0600
++++ b/globals.h	Mon Jan 03 13:24:37 2011 -0600
+@@ -148,6 +148,13 @@
+ WHERE char *CurrentFolder;
+ WHERE char *LastFolder;
+ 
++#ifdef USE_GROWL
++WHERE int GrowlEnable INITVAL (TRUE);
++WHERE char *GrowlNewTitle INITVAL (NULL);
++WHERE char *GrowlNewMessage INITVAL (NULL);
++WHERE char *GrowlPassword INITVAL (NULL);
++WHERE char *GrowlHost INITVAL (NULL);
++#endif
+ 
+ WHERE const char *ReleaseDate;
+ 
+diff -r 0fb98a9cad33 hdrline.c
+--- a/hdrline.c	Mon Jan 03 13:24:34 2011 -0600
++++ b/hdrline.c	Mon Jan 03 13:24:37 2011 -0600
+@@ -246,7 +246,7 @@
+  * %Y = `x-label:' field (if present, tree unfolded, and != parent's x-label)
+  * %Z = status flags	*/
+ 
+-static const char *
++const char *
+ hdr_format_str (char *dest,
+ 		size_t destlen,
+ 		size_t col,
+diff -r 0fb98a9cad33 init.h
+--- a/init.h	Mon Jan 03 13:24:34 2011 -0600
++++ b/init.h	Mon Jan 03 13:24:37 2011 -0600
+@@ -885,6 +885,52 @@
+   ** a regular expression that will match the whole name so mutt will expand
+   ** ``Franklin'' to ``Franklin, Steve''.
+   */
++#ifdef USE_GROWL
++  { "growl",        DT_BOOL, R_NONE, OPTGROWL, 0 },
++  /*
++  ** .pp
++  ** When set, perform Growl notifications for new mail.  Growl code uses
++  ** the Growl remote UDP protocol, so notifications can go to any destination
++  ** that mutt can reach.
++  */
++  { "growl_new_title", DT_STR, R_NONE, UL &GrowlNewTitle, UL "New Mail in %f" },
++  /*
++  ** .pp
++  ** A template for Growl notifications' title strings, using
++  ** ``$$status_format'' formatting codes.
++  */
++  { "growl_new_message", DT_STR, R_NONE, UL &GrowlNewMessage, UL "From: %n\nSubject: %s" },
++  /*
++  ** .pp
++  ** A template for Growl notifications' message strings, using
++  ** ``$$index_format'' formatting codes.
++  */
++  { "growl_password", DT_STR,  R_NONE, UL &GrowlPassword, UL "" },
++  /*
++  ** .pp
++  ** Your password for posting remote Growl notifications and registrations.
++  ** (See the Network pane of the Growl control panel.)
++  */
++  { "growl_target", DT_STR,  R_NONE, UL &GrowlHost, UL "localhost" },
++  /*
++  ** .pp
++  ** Internet address to which to send Growl notifications.  Any standard
++  ** format for naming a host and port is accepted:
++  ** .pp
++  ** .ts
++  ** .  hostname
++  ** .  hostname:port
++  ** .  ipv4address
++  ** .  ipv4address:port
++  ** .  ipv6address
++  ** .  [ipv6address]
++  ** .  [ipv6address]:port
++  ** .te
++  ** .pp
++  ** Service names may be used in place of a port number.  If no port number
++  ** is given, Growl's default UDP port (9887) is used.
++  */
++#endif /* USE_GROWL */
+   { "hdr_format",	DT_SYN,  R_NONE, UL "index_format", 0 },
+   /*
+   */
+diff -r 0fb98a9cad33 main.c
+--- a/main.c	Mon Jan 03 13:24:34 2011 -0600
++++ b/main.c	Mon Jan 03 13:24:37 2011 -0600
+@@ -292,6 +292,12 @@
+ 	"-USE_GSS  "
+ #endif
+ 
++#ifdef USE_GROWL
++	"+USE_GROWL  "
++#else
++	"-USE_GROWL  "
++#endif
++
+ #if HAVE_GETADDRINFO
+ 	"+HAVE_GETADDRINFO  "
+ #else
+diff -r 0fb98a9cad33 mutt.h
+--- a/mutt.h	Mon Jan 03 13:24:34 2011 -0600
++++ b/mutt.h	Mon Jan 03 13:24:37 2011 -0600
+@@ -521,6 +521,10 @@
+   OPTDONTHANDLEPGPKEYS,	/* (pseudo) used to extract PGP keys */
+   OPTUNBUFFEREDINPUT,   /* (pseudo) don't use key buffer */
+ 
++#ifdef USE_GROWL
++  OPTGROWL, /* enable Growl notifications */
++#endif
++
+   OPTMAX
+ };
+ 
+@@ -969,6 +973,13 @@
+ 
+ #define M_PARTS_TOPLEVEL	(1<<0)	/* is the top-level part */
+ 
++#ifdef USE_GROWL
++#define M_GROWL_MESSAGE  0
++#define M_GROWL_FOLDER   1
++#define M_GROWL_END      2
++void mutt_growl_notify(int type, void *data);
++#endif
++
+ #include "ascii.h"
+ #include "protos.h"
+ #include "lib.h"
+diff -r 0fb98a9cad33 protos.h
+--- a/protos.h	Mon Jan 03 13:24:34 2011 -0600
++++ b/protos.h	Mon Jan 03 13:24:37 2011 -0600
+@@ -78,6 +78,9 @@
+ void mutt_delete_parameter (const char *attribute, PARAMETER **p);
+ void mutt_set_parameter (const char *, const char *, PARAMETER **);
+ 
++const char *status_format_str (char *buf, size_t buflen, size_t col, char op, const char *src, const char *prefix, const char *ifstring, const char *elsestring, unsigned long data, format_flag flags);
++const char *hdr_format_str (char *dest, size_t destlen, size_t col, char op, const char *src, const char *prefix, const char *ifstring, const char *elsestring, unsigned long data, format_flag flags);
++
+ 
+ FILE *mutt_open_read (const char *, pid_t *);
+ 
+diff -r 0fb98a9cad33 status.c
+--- a/status.c	Mon Jan 03 13:24:34 2011 -0600
++++ b/status.c	Mon Jan 03 13:24:37 2011 -0600
+@@ -61,7 +61,7 @@
+  * %u = number of unread messages [option]
+  * %v = Mutt version 
+  * %V = currently active limit pattern [option] */
+-static const char *
++const char *
+ status_format_str (char *buf, size_t buflen, size_t col, char op, const char *src,
+ 		   const char *prefix, const char *ifstring,
+ 		   const char *elsestring,
+@@ -199,16 +199,19 @@
+       break;
+ 
+     case 'P':
+-      if (menu->top + menu->pagelen >= menu->max)
+-	cp = menu->top ? "end" : "all";
+-      else
++      if (menu)
+       {
+-	count = (100 * (menu->top + menu->pagelen)) / menu->max;
+-	snprintf (tmp, sizeof (tmp), "%d%%", count);
+-	cp = tmp;
++        if (menu->top + menu->pagelen >= menu->max)
++	  cp = menu->top ? "end" : "all";
++        else
++        {
++	  count = (100 * (menu->top + menu->pagelen)) / menu->max;
++	  snprintf (tmp, sizeof (tmp), "%d%%", count);
++	  cp = tmp;
++        }
++        snprintf (fmt, sizeof (fmt), "%%%ss", prefix);
++        snprintf (buf, buflen, fmt, cp);
+       }
+-      snprintf (fmt, sizeof (fmt), "%%%ss", prefix);
+-      snprintf (buf, buflen, fmt, cp);
+       break;
+ 
+     case 'r':
